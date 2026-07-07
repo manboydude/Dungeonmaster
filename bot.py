@@ -26,11 +26,14 @@ import dashboard
 # ============================ CONFIG ============================
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 GAME_CHANNEL = os.environ.get("GAME_CHANNEL", "adventure")
 HISTORY_LIMIT = 30
 SUMMARIZE_THRESHOLD = 50
 PORT = int(os.environ.get("PORT", "8080"))
+# When a check/roll happens in the game channel, feed the result to the DM
+# automatically so you never have to retype it. Set to "false" to disable.
+AUTO_DM_ON_ROLL = os.environ.get("AUTO_DM_ON_ROLL", "true").lower() in ("1", "true", "yes")
 # ===============================================================
 
 db.init(os.environ.get("DB_PATH", "dnd.db"))
@@ -46,16 +49,28 @@ ichor-slick Barrows markets; monster-haunted greatclub tunnels run beneath. Guil
 delvers vanish, a soft word can outweigh a blade. Tone: beautiful and rotten.
 
 RUNNING PLAY: describe scenes vividly but briefly, usually ending with "What do you do?". \
-When uncertain, call for a roll and give the command, e.g. "Make a Dexterity check — type \
-`!check Ball Wizard dex`." Run all NPCs. Respect 5e rules but make fair rulings when unsure; \
-you are not a rules engine. To spawn enemies for combat, tell players to type `!spawn goblin`.
+Run all NPCs. Respect 5e rules but make fair rulings when unsure; you are not a rules engine.
 
-STATE IS AUTHORITATIVE: you are given CURRENT STATE (HP, AC, slots, conditions, live enemies) \
-each turn — treat it as absolute truth, never invent numbers. When something should change, \
-tell players the command: `!damage NAME N`, `!heal NAME N`, `!slot NAME`, `!gold NAME +N`, \
-`!give NAME item`, `!condition NAME add/remove thing`. For attacks in a live fight, use \
-`!attack PC MONSTER` (player hits enemy) and `!mattack MONSTER PC` (enemy hits player) — the \
-bot rolls and applies those automatically.
+CALLING FOR ROLLS — use the exact command the bot understands. For a skill, the command is \
+`!check NAME skill`, e.g. "Make a Stealth check — type `!check Bungua stealth`" or \
+"Make a Perception check — type `!check Ball Wizard perception`". You do NOT need to tell \
+players about ability modifiers or proficiency — the bot adds those automatically from the \
+character's sheet. Valid skills: acrobatics, animal handling, arcana, athletics, deception, \
+history, insight, intimidation, investigation, medicine, nature, perception, performance, \
+persuasion, religion, sleight of hand, stealth, survival. For a raw ability, use e.g. \
+`!check NAME dex`. After a player rolls, the RESULT IS AUTOMATICALLY SENT TO YOU as a line \
+beginning "[dice]" — narrate the outcome from that number; the player does not retype it.
+
+CURRENT STATE IS AUTHORITATIVE: you are given each character's HP, AC, slots, conditions, \
+proficient skills, and their exact cantrips/spells, plus live enemies. Treat these as absolute \
+truth — never invent numbers, and use the listed spells/skills rather than making up your own. \
+When something should change, tell players the command: `!damage NAME N`, `!heal NAME N`, \
+`!slot NAME`, `!gold NAME +N`, `!give NAME item`, `!condition NAME add/remove thing`. \
+For combat, spawn enemies with `!spawn TYPE` (goblin, wolf, skeleton, bandit, zombie, \
+giant spider, cultist, bone-gnawer, ichor-hound, relic-wight). For a creature not on that \
+list, tell players `!spawn custom NAME HP AC TOHIT DAMAGE` (e.g. `!spawn custom Ooze 20 8 3 1d6`). \
+Then `!attack PC MONSTER` (player hits enemy) and `!mattack MONSTER PC` (enemy hits player) — \
+the bot rolls and applies those automatically.
 
 Honor PINNED FACTS and the STORY SUMMARY for continuity. Stay in character, warm and theatrical."""
 
@@ -95,6 +110,21 @@ async def maybe_summarize(g):
     g["history"] = recent
 
 
+async def dm_react(ch, g, cid, player_line):
+    """Send player input (an action, or an auto-relayed roll) to the DM, post the
+    response, and persist. Shared by narrative play and auto-roll relay."""
+    try:
+        async with ch.typing():
+            reply = await ask_gemini(build_turn_content(g, player_line))
+    except Exception as e:
+        await ch.send(f"⚠️ Gemini error: `{e}`"); return
+    g["history"] += [f"Player {player_line}", f"DM: {reply}"]
+    await maybe_summarize(g)
+    db.save_game(cid, g)
+    for i in range(0, len(reply), 1900):
+        await ch.send(reply[i:i + 1900])
+
+
 # ---- Embeds + buttons -------------------------------------------------------
 GOLD = 0xC9A86A
 
@@ -108,7 +138,13 @@ def sheet_embed(name, c):
     e.add_field(name="Abilities",
                 value="  ".join(f"{k.upper()} {ab[k]}({game.fmt_mod(game.ability_mod(ab[k]))})" for k in game.ABILS),
                 inline=False)
+    if c.get("skills"):
+        e.add_field(name="Skills", value=", ".join(c["skills"]), inline=False)
     e.add_field(name="Spell slots", value=game.slots_str(c), inline=False)
+    sp = c.get("spells", {})
+    if sp.get("cantrips") or sp.get("prepared"):
+        e.add_field(name="Cantrips", value=", ".join(sp.get("cantrips", [])) or "none", inline=False)
+        e.add_field(name="Prepared spells", value=", ".join(sp.get("prepared", [])) or "none", inline=False)
     e.add_field(name="Gold / XP", value=f"{c['gold']} gp · {c['xp']} xp", inline=True)
     e.add_field(name="Conditions", value=", ".join(c["conditions"]) or "none", inline=True)
     e.add_field(name="Inventory", value=", ".join(c["inventory"]) or "empty", inline=False)
@@ -217,10 +253,11 @@ def parse_signed(s):
 HELP_TEXT = """**Odrun Fell — commands** (also available as `/slash` commands)
 Type actions in **#{ch}**; the AI DM responds.
 
-**Dice/checks:** `!roll 1d20+3` · `!check <name> <ability> [prof]`
+**Dice/checks:** `!roll 1d20+3` · `!check <name> <skill or ability>` (e.g. `!check Bungua stealth` — proficiency auto-added)
+**Spells:** `!spells <name>`
 **Sheet/stats:** `!sheet [name]` · `!damage/!heal <name> <n>` · `!slot <name> [lvl]` · `!gold/!xp <name> +N` · `!give/!drop <name> <item>` · `!condition <name> add|remove <x>` · `!rest <name>`
 **Characters:** `!create <name> <race> <class>` (rolls stats) or `/create` menus · `!newchar <name> <hp> <ac>`
-**Combat:** `!spawn <monster>` · `!monsters` · `!attack <pc> <monster>` · `!mattack <monster> <pc>` · `!deathsave <name>`
+**Combat:** `!spawn <monster>` (or `!spawn custom <name> <hp> <ac> <tohit> <dmg>`) · `!monsters` · `!attack <pc> <monster>` · `!mattack <monster> <pc>` · `!deathsave <name>`
 **Turn order:** `!init start` → `!init roll <name> <mod>` → `!init go` · `!next` · `!init end`
 **Map:** `!map` · `!map place <name> <x> <y>` · `!map clear`
 **Memory:** `!remember <fact>` · `!recap`
@@ -266,15 +303,30 @@ async def _process_message(message):
 
     if lower.startswith("!check"):
         if len(parts) < 3:
-            await ch.send("`!check <name> <ability> [prof]`"); return
-        add_prof = parts[-1].lower() in ("prof", "+prof", "p")
-        idx = -2 if add_prof else -1
-        abil = parts[idx].lower()[:3]
-        name = game.find_char(g, " ".join(parts[1:idx]))
-        if not name or abil not in game.ABILS:
-            await ch.send("Bad character or ability."); return
-        _, text, _ = game.roll_check(g["characters"][name], abil, add_prof)
-        await ch.send(f"**{name}** — 🎲 {text}"); return
+            await ch.send("`!check <name> <skill or ability> [prof]` — e.g. `!check Bungua stealth`"); return
+        toks = parts[1:]
+        add_prof = toks[-1].lower() in ("prof", "+prof", "p")
+        if add_prof:
+            toks = toks[:-1]
+        # Match the skill/ability from the TAIL (skills can be up to 3 words),
+        # so the remaining leading tokens are the character name.
+        name, term = None, None
+        for take in (3, 2, 1):
+            if len(toks) > take:
+                cand_term = " ".join(toks[-take:]).lower()
+                cand_name = game.find_char(g, " ".join(toks[:-take]))
+                if cand_name and game.resolve_term(g["characters"][cand_name], cand_term):
+                    name, term = cand_name, cand_term; break
+        if not name:
+            await ch.send("Couldn't read that. Try `!check <name> <skill or ability>`.\n"
+                          "Skills: " + ", ".join(sorted(game.SKILLS)) + ".")
+            return
+        total, text, _ = game.roll_check(g["characters"][name], term, add_prof)
+        await ch.send(f"**{name}** — 🎲 {text}")
+        # Auto-relay the result to the DM so you don't have to retype it.
+        if AUTO_DM_ON_ROLL and getattr(ch, "name", None) == GAME_CHANNEL:
+            await dm_react(ch, g, cid, f"[dice] {name}'s check result: {text}")
+        return
 
     # ---- sheet (embed + buttons) ----
     if lower == "!sheet":
@@ -355,6 +407,21 @@ async def _process_message(message):
             c["inventory"].remove(match); await send_save(f"🗑️ {name} drops **{match}**.")
         return
 
+    # ---- spells ----
+    if lower.startswith("!spells") or lower.startswith("!spell"):
+        name = game.find_char(g, " ".join(parts[1:])) if len(parts) > 1 else "Ball Wizard"
+        name = game.find_char(g, name) if name else None
+        if not name:
+            await ch.send("`!spells <name>`"); return
+        c = g["characters"][name]; sp = c.get("spells", {})
+        if not (sp.get("cantrips") or sp.get("prepared")):
+            await ch.send(f"{name} has no spells (not a caster)."); return
+        await ch.send(
+            f"**{name}'s spells** — slots {game.slots_str(c)}\n"
+            f"**Cantrips** (unlimited): {', '.join(sp.get('cantrips', [])) or 'none'}\n"
+            f"**Prepared** (cost a slot): {', '.join(sp.get('prepared', [])) or 'none'}")
+        return
+
     # ---- conditions ----
     if lower.startswith("!condition") or lower.startswith("!cond"):
         if len(parts) < 4 or parts[2].lower() not in ("add", "remove", "rm"):
@@ -387,12 +454,24 @@ async def _process_message(message):
     # ---- COMBAT: spawn / monsters / attack / mattack ----
     if lower.startswith("!spawn"):
         if len(parts) < 2:
-            await ch.send("`!spawn <monster>` — " + ", ".join(sorted(combat.MONSTERS))); return
+            await ch.send("`!spawn <monster>` — " + ", ".join(sorted(combat.MONSTERS)) +
+                          "\nor `!spawn custom <name> <hp> <ac> <tohit> <dmg>` for a made-up creature."); return
+        # Custom creature: !spawn custom Ooze 20 8 3 1d6
+        if parts[1].lower() == "custom":
+            if len(parts) < 7:
+                await ch.send("`!spawn custom <name> <hp> <ac> <tohit> <dmg>` — e.g. `!spawn custom Ooze 20 8 3 1d6`"); return
+            dmg = parts[-1]; to_hit = parse_signed(parts[-2]); ac = parse_signed(parts[-3]); hp = parse_signed(parts[-4])
+            label = " ".join(parts[2:-4])
+            if None in (hp, ac, to_hit) or game.roll_expr(dmg)[0] is None or not label:
+                await ch.send("hp/ac/tohit must be numbers and dmg like `1d6+2`."); return
+            name = combat.spawn_custom(g, label, hp, ac, to_hit, dmg)
+            mob = g["monsters"][name]
+            await send_save(f"👹 **{name}** appears! HP {mob['hp']}, AC {mob['ac']}."); return
         # allow two-word types like "giant spider"
         mtype = " ".join(parts[1:])
         name, opts = combat.spawn(g, mtype)
         if name is None:
-            await ch.send("Unknown monster. Try: " + ", ".join(opts)); return
+            await ch.send("Unknown monster. Try: " + ", ".join(opts) + "\nor `!spawn custom <name> <hp> <ac> <tohit> <dmg>`."); return
         mob = g["monsters"][name]
         await send_save(f"👹 **{name}** appears! HP {mob['hp']}, AC {mob['ac']}."); return
 
@@ -572,17 +651,7 @@ async def _process_message(message):
     wait = on_cooldown(message.author.id, "narrative", COOLDOWN_NARRATIVE)
     if wait:
         await ch.send(f"⏳ Easy — wait {wait}s before your next action.", delete_after=3); return
-    line = f"{message.author.display_name}: {content}"
-    try:
-        async with ch.typing():
-            reply = await ask_gemini(build_turn_content(g, line))
-    except Exception as e:
-        await ch.send(f"⚠️ Gemini error: `{e}`"); return
-    g["history"] += [f"Player {line}", f"DM: {reply}"]
-    await maybe_summarize(g)
-    db.save_game(cid, g)
-    for i in range(0, len(reply), 1900):
-        await ch.send(reply[i:i + 1900])
+    await dm_react(ch, g, cid, f"{message.author.display_name}: {content}")
 
 
 # ---- Slash commands (parallel to prefix; sync in on_ready) ------------------
@@ -593,13 +662,14 @@ async def s_roll(interaction: discord.Interaction, dice: str):
         f"🎲 `{dice}` → [{detail}] = **{total}**" if total is not None else "Couldn't read that.")
 
 
-@tree.command(name="check", description="Ability check with the character's modifier")
-async def s_check(interaction: discord.Interaction, name: str, ability: str, proficient: bool = False):
+@tree.command(name="check", description="Skill or ability check (skills auto-add proficiency)")
+@app_commands.describe(skill="A skill like stealth/perception, or an ability like dex")
+async def s_check(interaction: discord.Interaction, name: str, skill: str, proficient: bool = False):
     g = db.load_game(interaction.channel_id, game.fresh_game)
-    cn = game.find_char(g, name); ab = ability.lower()[:3]
-    if not cn or ab not in game.ABILS:
-        await interaction.response.send_message("Bad character or ability.", ephemeral=True); return
-    _, text, _ = game.roll_check(g["characters"][cn], ab, proficient)
+    cn = game.find_char(g, name)
+    if not cn or game.resolve_term(g["characters"][cn], skill) is None:
+        await interaction.response.send_message("Bad character or skill/ability.", ephemeral=True); return
+    _, text, _ = game.roll_check(g["characters"][cn], skill, proficient)
     await interaction.response.send_message(f"**{cn}** — 🎲 {text}")
 
 

@@ -15,7 +15,24 @@ MONSTERS = {
     "zombie":       {"ac": 8,  "hp": 22, "hit_die": "3d8+9", "attack": ("Slam", 3, "1d6+1")},
     "giant spider": {"ac": 14, "hp": 26, "hit_die": "4d10+4", "attack": ("Bite", 5, "1d8+3")},
     "cultist":      {"ac": 12, "hp": 9,  "hit_die": "2d8",  "attack": ("Ritual dagger", 3, "1d4+1")},
+    # Odrun Fell flavor creatures:
+    "bone-gnawer":  {"ac": 12, "hp": 5,  "hit_die": "2d4",  "attack": ("Bite", 3, "1d4+1")},
+    "ichor-hound":  {"ac": 13, "hp": 14, "hit_die": "3d8+3", "attack": ("Claw", 4, "1d6+2")},
+    "relic-wight":  {"ac": 14, "hp": 22, "hit_die": "4d8+4", "attack": ("Bone blade", 4, "1d8+2")},
 }
+
+
+def spawn_custom(game, label, hp, ac, to_hit, dmg_expr):
+    """Stat a made-up creature on the fly, e.g. a monster the DM invented."""
+    name, n = label, 1
+    while name in game["monsters"]:
+        n += 1
+        name = f"{label} {n}"
+    game["monsters"][name] = {
+        "type": "custom", "ac": ac, "hp": hp, "max_hp": hp,
+        "attack": ["Attack", to_hit, dmg_expr],
+    }
+    return name
 
 
 def spawn(game, mtype, custom_name=None):

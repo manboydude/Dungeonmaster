@@ -9,6 +9,16 @@ import random
 ABILS = {"str": "Strength", "dex": "Dexterity", "con": "Constitution",
          "int": "Intelligence", "wis": "Wisdom", "cha": "Charisma"}
 
+# Each skill maps to the ability it uses.
+SKILLS = {
+    "acrobatics": "dex", "animal handling": "wis", "arcana": "int", "athletics": "str",
+    "deception": "cha", "history": "int", "insight": "wis", "intimidation": "cha",
+    "investigation": "int", "medicine": "wis", "nature": "int", "perception": "wis",
+    "performance": "cha", "persuasion": "cha", "religion": "int", "sleight of hand": "dex",
+    "stealth": "dex", "survival": "wis",
+}
+_ABIL_FULL = {v.lower(): k for k, v in ABILS.items()}  # "strength" -> "str"
+
 # 5e experience thresholds (index = level).
 XP_THRESHOLDS = [0, 0, 300, 900, 2700, 6500, 14000, 23000, 34000, 48000, 64000,
                  85000, 100000, 120000, 140000, 165000, 195000, 225000, 265000,
@@ -46,6 +56,8 @@ def new_character(cls="Adventurer", level=1, ac=10, hp=8, hit_die=8,
         "inventory": inventory or [], "conditions": [], "notes": "",
         "portrait": None,
         "dying": None,   # None, or {"s": successes, "f": failures}
+        "skills": [],    # proficient skill names, e.g. ["Stealth", "Perception"]
+        "spells": {"cantrips": [], "prepared": []},
     }
 
 
@@ -59,6 +71,24 @@ RACES = {
     "halfling": {"dex": 2, "cha": 1},
     "half-orc": {"str": 2, "con": 1},
     "tiefling": {"cha": 2, "int": 1},
+}
+
+# Sensible default skill proficiencies per class (since !create doesn't ask).
+CLASS_SKILLS = {
+    "fighter":   ["Athletics", "Perception", "Intimidation", "Survival"],
+    "wizard":    ["Arcana", "History", "Investigation", "Insight"],
+    "rogue":     ["Stealth", "Sleight of Hand", "Perception", "Acrobatics", "Investigation", "Deception"],
+    "cleric":    ["Insight", "Medicine", "Religion", "Persuasion"],
+    "ranger":    ["Stealth", "Perception", "Survival", "Animal Handling", "Nature"],
+    "barbarian": ["Athletics", "Perception", "Intimidation", "Survival"],
+}
+
+# Default level-1 spell loadouts for casters.
+CLASS_SPELLS = {
+    "wizard": {"cantrips": ["Fire Bolt", "Mage Hand", "Prestidigitation"],
+               "prepared": ["Magic Missile", "Shield", "Detect Magic", "Sleep", "Feather Fall"]},
+    "cleric": {"cantrips": ["Sacred Flame", "Guidance", "Light"],
+               "prepared": ["Cure Wounds", "Bless", "Guiding Bolt", "Shield of Faith"]},
 }
 
 CLASSES = {
@@ -113,6 +143,9 @@ def build_character(name, race, cls, scores=None):
     # derived HP and AC
     c["max_hp"] = c["hp"] = max(1, conf["hit_die"] + ability_mod(c["abilities"]["con"]))
     c["ac"] = conf["ac"]["base"] + (ability_mod(c["abilities"]["dex"]) if conf["ac"]["dex"] else 0)
+    c["skills"] = list(CLASS_SKILLS.get(cls, []))
+    sp = CLASS_SPELLS.get(cls)
+    c["spells"] = {"cantrips": list(sp["cantrips"]), "prepared": list(sp["prepared"])} if sp else {"cantrips": [], "prepared": []}
     c["notes"] = f"{race.title()} {cls.title()}"
     return c
 
@@ -159,6 +192,9 @@ def fresh_game():
         inventory=["Quarterstaff", "Spellbook", "Component pouch", "Scholar's pack", "Lens on a chain"],
     )
     ball["notes"] = "Human Wizard, Sage background. Aiming to become a Gandalf-style archmage."
+    ball["skills"] = ["Arcana", "History", "Investigation", "Insight"]
+    ball["spells"] = {"cantrips": ["Fire Bolt", "Mage Hand", "Prestidigitation"],
+                      "prepared": ["Magic Missile", "Shield", "Detect Magic", "Sleep", "Feather Fall"]}
     return {
         "characters": {"Ball Wizard": ball},
         "monsters": {},
@@ -188,17 +224,38 @@ def roll_expr(expr):
     return total, detail
 
 
-def roll_check(char, abil, add_prof):
-    score = char["abilities"][abil]
-    mod = ability_mod(score)
-    bonus = mod + (char["prof_bonus"] if add_prof else 0)
+def resolve_term(char, term):
+    """Turn 'stealth' / 'dex' / 'dexterity' into (ability, skill_label, proficient_by_skill).
+    Returns None if the term isn't a known ability or skill."""
+    term = term.strip().lower()
+    if term in ABILS:                      # "dex"
+        return term, None, False
+    if term in _ABIL_FULL:                 # "dexterity"
+        return _ABIL_FULL[term], None, False
+    if term in SKILLS:                     # "stealth" / "sleight of hand"
+        prof = any(s.lower() == term for s in char.get("skills", []))
+        return SKILLS[term], term.title(), prof
+    return None
+
+
+def roll_check(char, term, add_prof=False):
+    """Roll a d20 check for an ability or named skill. Skills auto-add proficiency
+    if the character is trained. Returns (total, text, d20) or (None, None, None)."""
+    resolved = resolve_term(char, term)
+    if resolved is None:
+        return None, None, None
+    abil, skill_label, skill_prof = resolved
+    proficient = add_prof or skill_prof
+    mod = ability_mod(char["abilities"][abil])
+    bonus = mod + (char["prof_bonus"] if proficient else 0)
     d20 = random.randint(1, 20)
     total = d20 + bonus
+    label = f"{skill_label} " if skill_label else ""
     parts = f"d20({d20}) {fmt_mod(mod)} {ABILS[abil][:3]}"
-    if add_prof:
+    if proficient:
         parts += f" {fmt_mod(char['prof_bonus'])} prof"
     crit = "  💥 NAT 20!" if d20 == 20 else ("  💀 nat 1" if d20 == 1 else "")
-    return total, f"{parts} = {total}{crit}", d20
+    return total, f"{label}{parts} = {total}{crit}", d20
 
 
 # ---- XP / leveling ----------------------------------------------------------
@@ -226,10 +283,16 @@ def slots_str(char):
 def render_sheet_text(name, c):
     ab = c["abilities"]
     ab_line = "  ".join(f"{k.upper()} {ab[k]}({fmt_mod(ability_mod(ab[k]))})" for k in ABILS)
+    sp = c.get("spells", {})
+    spell_line = ""
+    if sp.get("cantrips") or sp.get("prepared"):
+        spell_line = (f"\nCantrips — {', '.join(sp.get('cantrips', [])) or 'none'}"
+                      f"\nSpells — {', '.join(sp.get('prepared', [])) or 'none'}")
     return (f"{name} — {c['class']} lvl {c['level']}\n"
             f"HP {c['hp']}/{c['max_hp']} | AC {c['ac']} | Prof {fmt_mod(c['prof_bonus'])} | "
             f"Gold {c['gold']} | XP {c['xp']}\n{ab_line}\n"
-            f"Spell slots — {slots_str(c)}\n"
+            f"Skills — {', '.join(c.get('skills', [])) or 'none'}\n"
+            f"Spell slots — {slots_str(c)}{spell_line}\n"
             f"Conditions — {', '.join(c['conditions']) or 'none'}\n"
             f"Inventory — {', '.join(c['inventory']) or 'empty'}")
 
@@ -239,6 +302,11 @@ def state_for_dm(game):
     for name, c in game["characters"].items():
         cond = f" | conditions: {', '.join(c['conditions'])}" if c["conditions"] else ""
         lines.append(f"- {name}: {c['class']} lvl {c['level']} | HP {c['hp']}/{c['max_hp']} | AC {c['ac']} | slots {slots_str(c)}{cond}")
+        if c.get("skills"):
+            lines.append(f"    proficient skills: {', '.join(c['skills'])}")
+        sp = c.get("spells", {})
+        if sp.get("cantrips") or sp.get("prepared"):
+            lines.append(f"    cantrips: {', '.join(sp.get('cantrips', [])) or 'none'}; spells: {', '.join(sp.get('prepared', [])) or 'none'}")
     for mname, mob in game.get("monsters", {}).items():
         if mob["hp"] > 0:
             lines.append(f"- [enemy] {mname}: HP {mob['hp']}/{mob['max_hp']} | AC {mob['ac']}")
