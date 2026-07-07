@@ -199,12 +199,30 @@ def fresh_game():
         "characters": {"Ball Wizard": ball},
         "monsters": {},
         "history": [], "pinned": [], "summary": "",
+        "quests": [], "npcs": {},
         "initiative": {"order": [], "turn": 0, "active": False},
         "map": {"w": 8, "h": 8, "tokens": {}},
     }
 
 
-# ---- Dice -------------------------------------------------------------------
+def ensure_keys(g):
+    """Backfill any missing keys on a game loaded from an older save, so schema
+    changes never crash the bot on existing data."""
+    g.setdefault("characters", {})
+    g.setdefault("monsters", {})
+    g.setdefault("history", [])
+    g.setdefault("pinned", [])
+    g.setdefault("summary", "")
+    g.setdefault("quests", [])
+    g.setdefault("npcs", {})
+    g.setdefault("initiative", {"order": [], "turn": 0, "active": False})
+    g.setdefault("map", {"w": 8, "h": 8, "tokens": {}})
+    for c in g["characters"].values():
+        c.setdefault("skills", [])
+        c.setdefault("spells", {"cantrips": [], "prepared": []})
+        c.setdefault("dying", None)
+        c.setdefault("conditions", [])
+    return g
 DICE_RE = re.compile(r"^\s*(\d*)\s*d\s*(\d+)\s*([+-]\s*\d+)?\s*$", re.IGNORECASE)
 
 
