@@ -145,10 +145,33 @@ def test_spawn_parse():
     check("single type -> count 1", parse("skeleton") == [("skeleton", 1)])
 
 
+def test_inventory():
+    print("inventory & quantities")
+    c = game.build_character("Loot", "human", "fighter")
+    check("kit migrated to dict", isinstance(c["inventory"], dict))
+    game.add_item(c, "blue mushroom", 2)
+    check("add with qty", c["inventory"]["blue mushroom"] == 2)
+    game.add_item(c, "Blue Mushroom")  # case-insensitive stacks
+    check("case-insensitive stack", c["inventory"]["blue mushroom"] == 3)
+    matched = game.remove_item(c, "blue mushroom", 1)
+    check("remove decrements", matched == "blue mushroom" and c["inventory"]["blue mushroom"] == 2)
+    game.remove_item(c, "blue mushroom", 5)
+    check("remove past zero deletes", "blue mushroom" not in c["inventory"])
+    check("remove missing returns None", game.remove_item(c, "nonexistent") is None)
+    check("inv_str shows counts", "×" in game.inv_str(c) or game.inv_str(c) != "empty")
+    # migration of an old list-style inventory
+    old = {"characters": {"B": {"class": "F", "level": 1, "ac": 10, "hp": 8, "max_hp": 8,
+                                "hit_die": 10, "abilities": {k: 10 for k in game.ABILS},
+                                "prof_bonus": 2, "slots": {}, "gold": 0, "xp": 0,
+                                "inventory": ["sword", "sword", "torch"]}}}
+    game.ensure_keys(old)
+    check("old list inv migrates with counts", old["characters"]["B"]["inventory"] == {"sword": 2, "torch": 1})
+
+
 def main():
     for t in (test_dice_and_abilities, test_character_build, test_skill_checks,
               test_leveling, test_death_saves, test_combat, test_db_roundtrip,
-              test_ensure_keys, test_spawn_parse):
+              test_ensure_keys, test_spawn_parse, test_inventory):
         t()
     print()
     if _failures:

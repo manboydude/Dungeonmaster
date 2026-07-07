@@ -10,7 +10,7 @@ your live game dashboard.
 import threading
 from flask import Flask
 import db
-from game import ability_mod, fmt_mod, ABILS, slots_str
+from game import ability_mod, fmt_mod, ABILS, slots_str, inv_str
 
 app = Flask(__name__)
 
@@ -53,7 +53,7 @@ def _card(name, c):
       <div class="line">Spell slots: {slots_str(c)}</div>
       <div class="line">Gold {c['gold']} · XP {c['xp']} · Prof {fmt_mod(c['prof_bonus'])}</div>
       <div class="line">Conditions: {', '.join(c['conditions']) or 'none'}</div>
-      <div class="line">Inventory: {', '.join(c['inventory']) or 'empty'}</div>
+      <div class="line">Inventory: {inv_str(c)}</div>
     </div>"""
 
 

@@ -45,6 +45,52 @@ def fmt_mod(m):
     return f"+{m}" if m >= 0 else str(m)
 
 
+def _to_inv(inventory):
+    """Normalize an inventory (list or dict) to a {name: qty} dict."""
+    if isinstance(inventory, dict):
+        return dict(inventory)
+    d = {}
+    for it in (inventory or []):
+        d[it] = d.get(it, 0) + 1
+    return d
+
+
+def _find_item(inv, name):
+    """Case-insensitive lookup of the actual inventory key for `name`."""
+    name = name.strip().lower()
+    for k in inv:
+        if k.lower() == name:
+            return k
+    return None
+
+
+def add_item(c, name, qty=1):
+    name = name.strip()
+    inv = c["inventory"]
+    key = _find_item(inv, name) or name
+    inv[key] = inv.get(key, 0) + max(1, qty)
+    return inv[key]
+
+
+def remove_item(c, name, qty=1):
+    """Remove qty of an item. Returns the matched name, or None if not carried."""
+    inv = c["inventory"]
+    key = _find_item(inv, name)
+    if key is None:
+        return None
+    inv[key] -= max(1, qty)
+    if inv[key] <= 0:
+        del inv[key]
+    return key
+
+
+def inv_str(c):
+    inv = c.get("inventory", {})
+    if not inv:
+        return "empty"
+    return ", ".join(f"{k} ×{v}" if v > 1 else k for k, v in inv.items())
+
+
 def new_character(cls="Adventurer", level=1, ac=10, hp=8, hit_die=8,
                   abilities=None, slots=None, inventory=None, notes=""):
     return {
@@ -53,7 +99,7 @@ def new_character(cls="Adventurer", level=1, ac=10, hp=8, hit_die=8,
         "abilities": abilities or {k: 10 for k in ABILS},
         "prof_bonus": prof_for_level(level),
         "slots": slots or {}, "gold": 0, "xp": XP_THRESHOLDS[level],
-        "inventory": inventory or [], "conditions": [], "notes": "",
+        "inventory": _to_inv(inventory), "conditions": [], "notes": "",
         "portrait": None,
         "dying": None,   # None, or {"s": successes, "f": failures}
         "skills": [],    # proficient skill names, e.g. ["Stealth", "Perception"]
@@ -222,6 +268,7 @@ def ensure_keys(g):
         c.setdefault("spells", {"cantrips": [], "prepared": []})
         c.setdefault("dying", None)
         c.setdefault("conditions", [])
+        c["inventory"] = _to_inv(c.get("inventory"))   # migrate list -> {name: qty}
     return g
 DICE_RE = re.compile(r"^\s*(\d*)\s*d\s*(\d+)\s*([+-]\s*\d+)?\s*$", re.IGNORECASE)
 
@@ -312,7 +359,7 @@ def render_sheet_text(name, c):
             f"Skills — {', '.join(c.get('skills', [])) or 'none'}\n"
             f"Spell slots — {slots_str(c)}{spell_line}\n"
             f"Conditions — {', '.join(c['conditions']) or 'none'}\n"
-            f"Inventory — {', '.join(c['inventory']) or 'empty'}")
+            f"Inventory — {inv_str(c)}")
 
 
 def state_for_dm(game):

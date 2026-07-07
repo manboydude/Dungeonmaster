@@ -95,8 +95,12 @@ enemies appear, add [SPAWN: type xN] listing the creatures, e.g. [SPAWN: bone-gn
 [SPAWN: goblin x2, wolf x1] — the bot will stat them and track their HP automatically, so you \
 never need to ask players to spawn anything. Use known creature types when possible (goblin, \
 wolf, skeleton, bandit, zombie, giant spider, cultist, bone-gnawer, ichor-hound, relic-wight); \
-made-up names still work as weak generic creatures. Use these tags only for genuinely new \
-quests/NPCs/fights.
+made-up names still work as weak generic creatures. When a character picks up an item, add \
+[ITEM: CharacterName | item name | quantity] (quantity optional, default 1), e.g. \
+[ITEM: Ball Wizard | blue mushroom | 2]. When they gain or lose coin, add \
+[GOLD: CharacterName | +15] or [GOLD: Bungua | -5]. The bot files these onto the sheet \
+automatically, so never ask players to run !give or !gold. Use these tags only for genuinely \
+new quests/NPCs/fights/loot.
 
 CRITS: When a [dice] result shows "NAT 20", narrate it as a spectacular critical success with \
 extra flair. When it shows "nat 1", narrate a dramatic fumble. Make crits feel special."""
@@ -149,8 +153,9 @@ async def dm_react(ch, g, cid, player_line):
             raw = await ask_gemini(build_turn_content(g, player_line))
     except Exception as e:
         await ch.send(f"⚠️ Gemini error: `{e}`"); return
-    scene_desc, quests, npcs, spawns, reply = extract_tags(raw)
+    scene_desc, quests, npcs, spawns, items, gold, reply = extract_tags(raw)
     tag_notes = apply_tags(g, quests, npcs)
+    tag_notes += apply_loot(g, items, gold)
     spawned = apply_spawns(g, spawns)
     if spawned:
         tag_notes.append("⚔️ **Enemies appear:** " + ", ".join(
@@ -188,6 +193,8 @@ SCENE_RE = re.compile(r"\[SCENE:\s*(.+?)\]", re.IGNORECASE | re.DOTALL)
 QUEST_RE = re.compile(r"\[QUEST:\s*(.+?)\]", re.IGNORECASE | re.DOTALL)
 NPC_RE = re.compile(r"\[NPC:\s*(.+?)\]", re.IGNORECASE | re.DOTALL)
 SPAWN_RE = re.compile(r"\[SPAWN:\s*(.+?)\]", re.IGNORECASE | re.DOTALL)
+ITEM_RE = re.compile(r"\[ITEM:\s*(.+?)\]", re.IGNORECASE | re.DOTALL)
+GOLD_RE = re.compile(r"\[GOLD:\s*(.+?)\]", re.IGNORECASE | re.DOTALL)
 
 
 def load_game(cid):
@@ -196,8 +203,8 @@ def load_game(cid):
 
 
 def extract_tags(text):
-    """Pull [SCENE], [QUEST], [NPC], [SPAWN] tags out of a DM reply.
-    Returns (scene_desc, quests, npcs, spawns, cleaned_text)."""
+    """Pull [SCENE], [QUEST], [NPC], [SPAWN], [ITEM], [GOLD] tags out of a DM reply.
+    Returns (scene_desc, quests, npcs, spawns, items, gold, cleaned_text)."""
     scene = SCENE_RE.search(text)
     scene_desc = scene.group(1).strip() if scene else None
     quests = [q.strip() for q in QUEST_RE.findall(text)]
@@ -216,9 +223,26 @@ def extract_tags(text):
                 spawns.append((m.group(1).strip(), min(int(m.group(2)), 12)))
             else:
                 spawns.append((part, 1))
-    cleaned = SPAWN_RE.sub("", NPC_RE.sub("", QUEST_RE.sub("", SCENE_RE.sub("", text)))).strip()
+    items = []   # (character, item, qty)
+    for raw in ITEM_RE.findall(text):
+        bits = [b.strip() for b in raw.split("|")]
+        if len(bits) >= 2 and bits[0] and bits[1]:
+            qty = 1
+            if len(bits) >= 3 and bits[2].lstrip("x×").isdigit():
+                qty = int(bits[2].lstrip("x×"))
+            else:  # allow "blue mushroom x2" in the item field
+                qm = re.search(r"\s*[x×]\s*(\d+)$", bits[1])
+                if qm:
+                    qty = int(qm.group(1)); bits[1] = bits[1][:qm.start()].strip()
+            items.append((bits[0], bits[1], qty))
+    gold = []   # (character, delta)
+    for raw in GOLD_RE.findall(text):
+        bits = [b.strip() for b in raw.split("|")]
+        if len(bits) >= 2 and re.fullmatch(r"[+-]?\d+", bits[1].replace(" ", "")):
+            gold.append((bits[0], int(bits[1].replace(" ", ""))))
+    cleaned = GOLD_RE.sub("", ITEM_RE.sub("", SPAWN_RE.sub("", NPC_RE.sub("", QUEST_RE.sub("", SCENE_RE.sub("", text)))))).strip()
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    return scene_desc, quests, npcs, spawns, cleaned
+    return scene_desc, quests, npcs, spawns, items, gold, cleaned
 
 
 def apply_tags(g, quests, npcs):
@@ -253,6 +277,24 @@ def apply_spawns(g, spawns):
     return names
 
 
+def apply_loot(g, items, gold):
+    """File auto-detected items and gold onto the right character sheets.
+    Returns confirmation lines."""
+    notes = []
+    for who, item, qty in items:
+        cn = game.find_char(g, who)
+        if cn:
+            game.add_item(g["characters"][cn], item, qty)
+            notes.append(f"🎒 **{cn}** picks up {item}" + (f" ×{qty}" if qty > 1 else ""))
+    for who, delta in gold:
+        cn = game.find_char(g, who)
+        if cn:
+            c = g["characters"][cn]
+            c["gold"] = max(0, c["gold"] + delta)
+            notes.append(f"🪙 **{cn}** {'gains' if delta >= 0 else 'loses'} {abs(delta)} gold (now {c['gold']})")
+    return notes
+
+
 # ---- Embeds + buttons -------------------------------------------------------
 GOLD = 0xC9A86A
 
@@ -275,7 +317,7 @@ def sheet_embed(name, c):
         e.add_field(name="Prepared spells", value=", ".join(sp.get("prepared", [])) or "none", inline=False)
     e.add_field(name="Gold / XP", value=f"{c['gold']} gp · {c['xp']} xp", inline=True)
     e.add_field(name="Conditions", value=", ".join(c["conditions"]) or "none", inline=True)
-    e.add_field(name="Inventory", value=", ".join(c["inventory"]) or "empty", inline=False)
+    e.add_field(name="Inventory", value=game.inv_str(c), inline=False)
     if c.get("portrait"):
         e.set_thumbnail(url=c["portrait"])
     return e
@@ -527,24 +569,31 @@ async def _process_message(message):
     # ---- inventory ----
     if lower.startswith("!give") or lower.startswith("!drop"):
         if len(parts) < 3:
-            await ch.send("`!give <name> <item>`"); return
-        name = None
-        for cut in range(2, len(parts)):
-            cand = game.find_char(g, " ".join(parts[1:cut]))
+            await ch.send("`!give <name> <item> [qty]` — e.g. `!give Bungua scimitar 2`"); return
+        toks = parts[1:]
+        # optional trailing quantity: "2" or "x2"
+        qty = 1
+        qm = re.fullmatch(r"[xX]?(\d+)", toks[-1])
+        if qm and len(toks) >= 3:
+            qty = int(qm.group(1)); toks = toks[:-1]
+        # match the LONGEST leading run of tokens that names a character,
+        # so multi-word items after a multi-word name parse correctly.
+        name, item = None, None
+        for cut in range(len(toks) - 1, 0, -1):
+            cand = game.find_char(g, " ".join(toks[:cut]))
             if cand:
-                name, item = cand, " ".join(parts[cut:]); break
-        if not name:
-            name, item = game.find_char(g, parts[1]), " ".join(parts[2:])
+                name, item = cand, " ".join(toks[cut:]); break
         if not name or not item:
-            await ch.send("`!give Ball Wizard Torch`"); return
+            await ch.send("Couldn't read that. Try `!give Bungua scimitar 2`."); return
         c = g["characters"][name]
         if lower.startswith("!give"):
-            c["inventory"].append(item); await send_save(f"🎒 {name} gains **{item}**.")
+            total = game.add_item(c, item, qty)
+            await send_save(f"🎒 {name} gains **{item}**" + (f" ×{qty}" if qty > 1 else "") + f" (now ×{total}).")
         else:
-            match = next((it for it in c["inventory"] if it.lower() == item.lower()), None)
-            if not match:
+            matched = game.remove_item(c, item, qty)
+            if not matched:
                 await ch.send(f"{name} isn't carrying '{item}'."); return
-            c["inventory"].remove(match); await send_save(f"🗑️ {name} drops **{match}**.")
+            await send_save(f"🗑️ {name} drops **{matched}**" + (f" ×{qty}" if qty > 1 else "") + ".")
         return
 
     # ---- spells ----
