@@ -8,6 +8,8 @@ commands, with rich embeds and clickable buttons.
 """
 
 import os
+import io
+import re
 import typing
 import asyncio
 
@@ -34,6 +36,11 @@ PORT = int(os.environ.get("PORT", "8080"))
 # When a check/roll happens in the game channel, feed the result to the DM
 # automatically so you never have to retype it. Set to "false" to disable.
 AUTO_DM_ON_ROLL = os.environ.get("AUTO_DM_ON_ROLL", "true").lower() in ("1", "true", "yes")
+# Auto-generate a scene image when the DM signals the party entered a new area.
+# Only fires if ART_ENABLED is on. The cooldown caps how often images auto-generate
+# per channel, to keep image costs from running away.
+AUTO_SCENE_ART = os.environ.get("AUTO_SCENE_ART", "true").lower() in ("1", "true", "yes")
+AUTO_SCENE_COOLDOWN = float(os.environ.get("AUTO_SCENE_COOLDOWN", "45"))
 # ===============================================================
 
 db.init(os.environ.get("DB_PATH", "dnd.db"))
@@ -72,7 +79,14 @@ list, tell players `!spawn custom NAME HP AC TOHIT DAMAGE` (e.g. `!spawn custom 
 Then `!attack PC MONSTER` (player hits enemy) and `!mattack MONSTER PC` (enemy hits player) — \
 the bot rolls and applies those automatically.
 
-Honor PINNED FACTS and the STORY SUMMARY for continuity. Stay in character, warm and theatrical."""
+Honor PINNED FACTS and the STORY SUMMARY for continuity. Stay in character, warm and theatrical.
+
+SCENE IMAGES: When the party FIRST arrives in a distinct new location (a new room, cavern, \
+street, tavern, chamber, etc.), begin your reply with a tag on its own line in this exact \
+form: [SCENE: one vivid sentence describing what the place looks like]. Then continue your \
+narration normally. Do this ONLY on genuine arrival somewhere new — never for actions taken \
+within the same place, and never more than once per reply. The players never see this tag; \
+it silently triggers an illustration of the area."""
 
 
 # ---- Gemini helpers ---------------------------------------------------------
@@ -115,14 +129,45 @@ async def dm_react(ch, g, cid, player_line):
     response, and persist. Shared by narrative play and auto-roll relay."""
     try:
         async with ch.typing():
-            reply = await ask_gemini(build_turn_content(g, player_line))
+            raw = await ask_gemini(build_turn_content(g, player_line))
     except Exception as e:
         await ch.send(f"⚠️ Gemini error: `{e}`"); return
+    scene_desc, reply = extract_scene(raw)   # pull out any [SCENE: ...] tag
     g["history"] += [f"Player {player_line}", f"DM: {reply}"]
     await maybe_summarize(g)
     db.save_game(cid, g)
     for i in range(0, len(reply), 1900):
         await ch.send(reply[i:i + 1900])
+    await maybe_autoscene(ch, cid, scene_desc)
+
+
+SCENE_RE = re.compile(r"\[SCENE:\s*(.+?)\]", re.IGNORECASE | re.DOTALL)
+
+
+def extract_scene(text):
+    """Return (scene_description_or_None, text_with_tag_removed)."""
+    m = SCENE_RE.search(text)
+    desc = m.group(1).strip() if m else None
+    return desc, SCENE_RE.sub("", text).strip()
+
+
+_last_scene = {}
+
+
+async def maybe_autoscene(ch, cid, scene_desc):
+    """Auto-generate an area image if the DM flagged a new location and art is on."""
+    if not scene_desc or not AUTO_SCENE_ART or not art.is_enabled():
+        return
+    now = _time.monotonic()
+    if now - _last_scene.get(cid, 0) < AUTO_SCENE_COOLDOWN:
+        return   # too soon since the last auto image; skip to control cost
+    _last_scene[cid] = now
+    try:
+        async with ch.typing():
+            data = await asyncio.get_event_loop().run_in_executor(None, art.generate_scene, scene_desc)
+        await ch.send(file=discord.File(io.BytesIO(data), filename="scene.png"))
+    except Exception:
+        pass   # never let an image failure interrupt the story
 
 
 # ---- Embeds + buttons -------------------------------------------------------
