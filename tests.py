@@ -127,9 +127,28 @@ def test_ensure_keys():
     check("character spells backfilled", "cantrips" in g["characters"]["Bob"]["spells"])
 
 
+def test_spawn_parse():
+    print("spawn tag parsing")
+    # mirror the bot's SPAWN parse regex logic
+    import re
+    def parse(raw):
+        out = []
+        for part in raw.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            m = re.match(r"(.+?)\s*[x×]\s*(\d+)$", part, re.IGNORECASE)
+            out.append((m.group(1).strip(), int(m.group(2))) if m else (part, 1))
+        return out
+    check("'bone-gnawer x3' -> 3", parse("bone-gnawer x3") == [("bone-gnawer", 3)])
+    check("'goblin x2, wolf' -> mixed", parse("goblin x2, wolf") == [("goblin", 2), ("wolf", 1)])
+    check("single type -> count 1", parse("skeleton") == [("skeleton", 1)])
+
+
 def main():
     for t in (test_dice_and_abilities, test_character_build, test_skill_checks,
-              test_leveling, test_death_saves, test_combat, test_db_roundtrip, test_ensure_keys):
+              test_leveling, test_death_saves, test_combat, test_db_roundtrip,
+              test_ensure_keys, test_spawn_parse):
         t()
     print()
     if _failures:

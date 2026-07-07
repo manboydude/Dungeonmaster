@@ -90,8 +90,13 @@ it silently triggers an illustration of the area.
 
 WORLD TRACKING (hidden tags, players never see them): When you give the party a new task, \
 goal, or objective, add [QUEST: short description of the task]. When a named NPC is introduced \
-or becomes important, add [NPC: Name | a few words about who they are]. Use these tags sparingly \
-and only for genuinely new quests/NPCs — the bot logs them so the world stays consistent.
+or becomes important, add [NPC: Name | a few words about who they are]. When a fight begins or \
+enemies appear, add [SPAWN: type xN] listing the creatures, e.g. [SPAWN: bone-gnawer x3] or \
+[SPAWN: goblin x2, wolf x1] — the bot will stat them and track their HP automatically, so you \
+never need to ask players to spawn anything. Use known creature types when possible (goblin, \
+wolf, skeleton, bandit, zombie, giant spider, cultist, bone-gnawer, ichor-hound, relic-wight); \
+made-up names still work as weak generic creatures. Use these tags only for genuinely new \
+quests/NPCs/fights.
 
 CRITS: When a [dice] result shows "NAT 20", narrate it as a spectacular critical success with \
 extra flair. When it shows "nat 1", narrate a dramatic fumble. Make crits feel special."""
@@ -144,8 +149,12 @@ async def dm_react(ch, g, cid, player_line):
             raw = await ask_gemini(build_turn_content(g, player_line))
     except Exception as e:
         await ch.send(f"⚠️ Gemini error: `{e}`"); return
-    scene_desc, quests, npcs, reply = extract_tags(raw)
+    scene_desc, quests, npcs, spawns, reply = extract_tags(raw)
     tag_notes = apply_tags(g, quests, npcs)
+    spawned = apply_spawns(g, spawns)
+    if spawned:
+        tag_notes.append("⚔️ **Enemies appear:** " + ", ".join(
+            f"{n} (HP {g['monsters'][n]['hp']}, AC {g['monsters'][n]['ac']})" for n in spawned))
     g["history"] += [f"Player {player_line}", f"DM: {reply}"]
     await maybe_summarize(g)
     db.save_game(cid, g)
@@ -178,6 +187,7 @@ async def maybe_autoscene(ch, cid, scene_desc):
 SCENE_RE = re.compile(r"\[SCENE:\s*(.+?)\]", re.IGNORECASE | re.DOTALL)
 QUEST_RE = re.compile(r"\[QUEST:\s*(.+?)\]", re.IGNORECASE | re.DOTALL)
 NPC_RE = re.compile(r"\[NPC:\s*(.+?)\]", re.IGNORECASE | re.DOTALL)
+SPAWN_RE = re.compile(r"\[SPAWN:\s*(.+?)\]", re.IGNORECASE | re.DOTALL)
 
 
 def load_game(cid):
@@ -186,8 +196,8 @@ def load_game(cid):
 
 
 def extract_tags(text):
-    """Pull [SCENE], [QUEST], [NPC] tags out of a DM reply.
-    Returns (scene_desc, quests, npcs, cleaned_text)."""
+    """Pull [SCENE], [QUEST], [NPC], [SPAWN] tags out of a DM reply.
+    Returns (scene_desc, quests, npcs, spawns, cleaned_text)."""
     scene = SCENE_RE.search(text)
     scene_desc = scene.group(1).strip() if scene else None
     quests = [q.strip() for q in QUEST_RE.findall(text)]
@@ -195,9 +205,20 @@ def extract_tags(text):
     for raw in NPC_RE.findall(text):
         nm, _, note = raw.partition("|")
         npcs.append((nm.strip(), note.strip()))
-    cleaned = NPC_RE.sub("", QUEST_RE.sub("", SCENE_RE.sub("", text))).strip()
+    spawns = []
+    for raw in SPAWN_RE.findall(text):
+        for part in raw.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            m = re.match(r"(.+?)\s*[x×]\s*(\d+)$", part, re.IGNORECASE)
+            if m:
+                spawns.append((m.group(1).strip(), min(int(m.group(2)), 12)))
+            else:
+                spawns.append((part, 1))
+    cleaned = SPAWN_RE.sub("", NPC_RE.sub("", QUEST_RE.sub("", SCENE_RE.sub("", text)))).strip()
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    return scene_desc, quests, npcs, cleaned
+    return scene_desc, quests, npcs, spawns, cleaned
 
 
 def apply_tags(g, quests, npcs):
@@ -214,6 +235,22 @@ def apply_tags(g, quests, npcs):
         if nm:
             g["npcs"][nm] = note or g["npcs"].get(nm, "")
     return notes
+
+
+def apply_spawns(g, spawns):
+    """Stat the monsters the DM flagged when a fight starts. Known types use their
+    stat block; unknown ones get a modest generic creature so nothing is un-statted.
+    Returns the list of spawned names."""
+    names = []
+    for mtype, count in spawns:
+        for _ in range(count):
+            if len(g["monsters"]) >= 20:      # hard safety cap
+                break
+            nm, _opts = combat.spawn(g, mtype)
+            if nm is None:                    # DM invented a creature we don't know
+                nm = combat.spawn_custom(g, mtype.title(), 8, 12, 3, "1d6")
+            names.append(nm)
+    return names
 
 
 # ---- Embeds + buttons -------------------------------------------------------
